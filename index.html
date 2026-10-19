@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Console de Automação de Identidade — AD como Código</title>
+<meta name="description" content="Console de automação de infraestrutura: estado desejado declarativo, detecção de derivação, geração de PowerShell para Active Directory, fila de requisições com aprovação, rollback e trilha de auditoria acorrentada.">
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>&#9881;</text></svg>">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark">iac</span>
+      <div>
+        <strong>Automação de Identidade</strong>
+        <small>contoso.local · DC01</small>
+      </div>
+    </div>
+
+    <nav class="nav" id="nav" aria-label="Navegação da console">
+      <button class="nav-item is-active" type="button" data-view="painel">Painel<span class="nav-badge" id="badgePainel"></span></button>
+      <button class="nav-item" type="button" data-view="diretorio">Diretório<span class="nav-badge" id="badgeDiretorio"></span></button>
+      <button class="nav-item" type="button" data-view="desejado">Estado desejado<span class="nav-badge" id="badgeDesejado"></span></button>
+      <button class="nav-item" type="button" data-view="execucao">Plano &amp; execução<span class="nav-badge" id="badgeExecucao"></span></button>
+      <button class="nav-item" type="button" data-view="script">Script PowerShell</button>
+      <button class="nav-item" type="button" data-view="governanca">Governança<span class="nav-badge" id="badgeGovernanca"></span></button>
+      <button class="nav-item" type="button" data-view="auditoria">Auditoria</button>
+    </nav>
+
+    <div class="side-foot">
+      <label class="field-label" for="selModo">Modo de consolidação</label>
+      <select id="selModo" class="input input-sm">
+        <option value="parcial">Parcial — só o declarado</option>
+        <option value="recursivo">Recursivo — revogar o não declarado</option>
+      </select>
+      <label class="field-label" for="inpAtor">Operador conectado</label>
+      <input id="inpAtor" class="input input-sm" autocomplete="off" spellcheck="false">
+      <p class="side-note" id="storageNote"></p>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div>
+        <h1 id="viewTitulo">Painel de operação</h1>
+        <p class="topbar-sub" id="viewSub"></p>
+      </div>
+      <div class="topbar-actions">
+        <span class="stamp" id="stampAssinatura"></span>
+        <button class="btn btn-ghost btn-sm" type="button" id="btnOqueSao">Ambiente simulado?</button>
+        <button class="btn btn-ghost btn-sm" type="button" id="btnTema" aria-label="Alternar tema">Tema</button>
+      </div>
+    </header>
+
+    <section class="view is-active" id="view-painel">
+      <div class="kpi-grid" id="kpiPainel"></div>
+
+      <div class="grid grid-2">
+        <article class="card">
+          <header class="card-head">
+            <div>
+              <h2>Derivação do diretório</h2>
+              <p class="card-sub">Operações que o estado desejado ainda precisa consolidar, por nível de risco.</p>
+            </div>
+            <div class="chart-tools">
+              <button class="chip" type="button" data-toggle-series="baixo">Baixo</button>
+              <button class="chip" type="button" data-toggle-series="medio">Médio</button>
+              <button class="chip" type="button" data-toggle-series="alto">Alto</button>
+            </div>
+          </header>
+          <div class="chart-box"><canvas id="chartDeriva" aria-label="Barras empilhadas de derivação por risco"></canvas></div>
+          <footer class="card-foot" id="derivaFoot"></footer>
+        </article>
+
+        <article class="card">
+          <header class="card-head">
+            <div>
+              <h2>Fila de requisições</h2>
+              <p class="card-sub">Volume e mix de solicitações de identidade nos últimos 14 dias.</p>
+            </div>
+          </header>
+          <div class="chart-box"><canvas id="chartFila" aria-label="Barras empilhadas de requisições por tipo"></canvas></div>
+          <footer class="card-foot" id="filaFoot"></footer>
+        </article>
+
+        <article class="card">
+          <header class="card-head">
+            <div>
+              <h2>Membros por grupo de segurança</h2>
+              <p class="card-sub">Clique em um grupo para abrir os vínculos no diretório.</p>
+            </div>
+          </header>
+          <div class="chart-box chart-box-tall"><canvas id="chartGrupos" aria-label="Barras horizontais de membros por grupo"></canvas></div>
+          <footer class="card-foot" id="gruposFoot"></footer>
+        </article>
+
+        <article class="card">
+          <header class="card-head">
+            <div>
+              <h2>Tempo de atendimento</h2>
+              <p class="card-sub">Horas entre a abertura e a conclusão de cada requisição, contra o SLA de 12h.</p>
+            </div>
+          </header>
+          <div class="chart-box chart-box-tall"><canvas id="chartSla" aria-label="Barras de tempo de atendimento por requisição"></canvas></div>
+          <footer class="card-foot" id="slaFoot"></footer>
+        </article>
+      </div>
+
+      <article class="card">
+        <header class="card-head">
+          <div>
+            <h2>Achados de conformidade em aberto</h2>
+            <p class="card-sub">Regras de governança aplicadas ao inventário atual — as mesmas que esteiras de recertificação costumam rodar por exportação.</p>
+          </div>
+          <button class="btn btn-ghost btn-sm" type="button" data-goto="governanca">Ver todas as regras</button>
+        </header>
+        <div class="table-wrap">
+          <table class="table" id="tblTopGovernanca">
+            <thead><tr><th>Severidade</th><th>Regra</th><th>Conta</th><th>Achado</th><th>Correção sugerida</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+
+    <section class="view" id="view-diretorio">
+      <div class="kpi-grid kpi-grid-4" id="kpiDiretorio"></div>
+
+      <article class="card">
+        <header class="card-head">
+          <div>
+            <h2>Contas de domínio</h2>
+            <p class="card-sub" id="diretorioSub"></p>
+          </div>
+          <div class="filters">
+            <input id="filtraBusca" class="input input-sm" type="search" placeholder="nome ou sAMAccountName" aria-label="Buscar conta">
+            <select id="filtraSetor" class="input input-sm" aria-label="Filtrar por setor"><option value="">Setor: todos</option></select>
+            <select id="filtraGrupo" class="input input-sm" aria-label="Filtrar por grupo"><option value="">Grupo: todos</option></select>
+            <select id="filtraStatus" class="input input-sm" aria-label="Filtrar por status">
+              <option value="">Status: todos</option>
+              <option value="ativo">Ativas</option>
+              <option value="inativo">Desativadas</option>
+              <option value="dormente">Dormentes</option>
+              <option value="critico">Com vínculo crítico</option>
+            </select>
+            <button class="btn btn-ghost btn-sm" type="button" id="btnLimparFiltros">Limpar</button>
+          </div>
+        </header>
+        <div class="table-wrap">
+          <table class="table table-contas" id="tblContas">
+            <thead>
+              <tr>
+                <th data-sort="sam">Conta</th>
+                <th data-sort="nome">Nome</th>
+                <th data-sort="setor">Setor</th>
+                <th data-sort="ou">OU</th>
+                <th data-sort="ativo">Status</th>
+                <th data-sort="criticos">Grupos críticos</th>
+                <th data-sort="inatividade">Último logon</th>
+                <th>Ações</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <footer class="card-foot card-foot-split">
+          <span id="contasSummary"></span>
+          <span class="row-actions">
+            <button class="btn btn-ghost btn-sm" type="button" id="btnExportContas">Exportar CSV</button>
+          </span>
+        </footer>
+      </article>
+
+      <div class="grid grid-2">
+        <article class="card">
+          <header class="card-head">
+            <div>
+              <h2>Grupos de segurança</h2>
+              <p class="card-sub">Escopo, criticidade declarada e membros efetivos do inventário.</p>
+            </div>
+          </header>
+          <div class="table-wrap">
+            <table class="table" id="tblGrupos">
+              <thead><tr><th>Grupo</th><th>Escopo</th><th>Membros</th><th>Crítico</th><th>Descrição</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="card">
+          <header class="card-head">
+            <div>
+              <h2>Unidades organizacionais</h2>
+              <p class="card-sub">Herança de GPO e delegação dependem da OU; o estado desejado declara o destino de cada conta.</p>
+            </div>
+          </header>
+          <div class="table-wrap">
+            <table class="table" id="tblOus">
+              <thead><tr><th>DN</th><th>Contas</th><th>Ativas</th><th>Padrão de setor</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="view" id="view-desejado">
+      <div class="grid grid-editor">
+        <article class="card">
+          <header class="card-head">
+            <div>
+              <h2>estado-desejado</h2>
+              <p class="card-sub">Contrato declarativo: o que deve ser verdade sobre contas e grupos.</p>
+            </div>
+            <div class="row-actions">
+              <button class="btn btn-ghost btn-sm" type="button" id="btnExemplo">Restaurar exemplo</button>
+              <button class="btn btn-ghost btn-sm" type="button" id="btnFormatar">Reordenar blocos</button>
+            </div>
+          </header>
+          <textarea id="txtDesejado" class="editor" spellcheck="false" aria-label="Editor de estado desejado"></textarea>
+          <footer class="card-foot card-foot-split">
+            <span id="parseStatus"></span>
+            <span class="row-actions">
+              <button class="btn btn-primary btn-sm" type="button" id="btnValidar">Validar e calcular plano</button>
+            </span>
+          </footer>
+          <div class="table-wrap" id="errosWrap" hidden>
+            <table class="table table-erros" id="tblErros">
+              <thead><tr><th>Linha</th><th>Erro</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="card">
+          <header class="card-head">
+            <div>
+              <h2>Plano resultante</h2>
+              <p class="card-sub" id="planoSub"></p>
+            </div>
+            <div class="row-actions">
+              <button class="btn btn-ghost btn-sm" type="button" id="btnGerarRequisicao">Abrir como requisição</button>
+            </div>
+          </header>
+          <div class="table-wrap">
+            <table class="table table-plano" id="tblPlano">
+              <thead><tr><th>Risco</th><th>Operação</th><th>Alvo</th><th>Mudança</th><th>Cmdlet</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <footer class="card-foot" id="planoFoot"></footer>
+        </article>
+      </div>
+    </section>
+
+    <section class="view" id="view-execucao">
+      <div class="kpi-grid kpi-grid-4" id="kpiExecucao"></div>
+
+      <article class="card">
+        <header class="card-head">
+          <div>
+            <h2>Fila de requisições</h2>
+            <p class="card-sub">Fluxo com segregação de funções: ninguém aprova o que abriu, e nada é aplicado sem aprovação.</p>
+          </div>
+          <div class="row-actions">
+            <select id="selFilaStatus" class="input input-sm" aria-label="Filtrar requisições">
+              <option value="">Situação: todas</option>
+              <option value="aberta">Abertas</option>
+              <option value="planejada">Planejadas</option>
+              <option value="aprovada">Aprovadas</option>
+              <option value="concluida">Concluídas</option>
+              <option value="revertida">Revertidas</option>
+              <option value="rejeitada">Rejeitadas</option>
+              <option value="falhou">Com falha</option>
+            </select>
+            <button class="btn btn-ghost btn-sm" type="button" id="btnNovaRequisicao">Nova requisição</button>
+          </div>
+        </header>
+        <div class="table-wrap">
+          <table class="table table-fila" id="tblFila">
+            <thead>
+              <tr><th>Protocolo</th><th>Tipo</th><th>Título</th><th>Solicitante</th><th>Aprovador</th><th>Situação</th><th>Ops</th><th>Duração</th><th>Ações</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <footer class="card-foot" id="filaResumo"></footer>
+      </article>
+
+      <article class="card" id="cardExecucao" hidden>
+        <header class="card-head">
+          <div>
+            <h2 id="execTitulo">Resultado da execução</h2>
+            <p class="card-sub" id="execSub"></p>
+          </div>
+          <div class="row-actions">
+            <button class="btn btn-ghost btn-sm" type="button" id="btnFecharExec">Fechar</button>
+          </div>
+        </header>
+        <div class="table-wrap">
+          <table class="table" id="tblExecucao">
+            <thead><tr><th>Situação</th><th>Operação</th><th>Alvo</th><th>Resultado</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+
+    <section class="view" id="view-script">
+      <article class="card">
+        <header class="card-head">
+          <div>
+            <h2>Consolidar-Identidade.ps1</h2>
+            <p class="card-sub">PowerShell real gerado do plano: <code>SupportsShouldProcess</code> para <code>-WhatIf</code>, diário de reversão, transcript e auditoria em CSV.</p>
+          </div>
+          <div class="row-actions">
+            <button class="btn btn-ghost btn-sm" type="button" data-script="plano">Plano</button>
+            <button class="btn btn-ghost btn-sm" type="button" data-script="reversao">Reversão</button>
+            <button class="btn btn-ghost btn-sm" type="button" id="btnCopiarScript">Copiar</button>
+            <button class="btn btn-primary btn-sm" type="button" id="btnBaixarScript">Baixar .ps1</button>
+          </div>
+        </header>
+        <pre class="code" id="boxScript"></pre>
+        <footer class="card-foot" id="scriptFoot"></footer>
+      </article>
+    </section>
+
+    <section class="view" id="view-governanca">
+      <div class="grid grid-2">
+        <article class="card">
+          <header class="card-head">
+            <div>
+              <h2>Score de conformidade</h2>
+              <p class="card-sub">Peso por severidade, limitado por conta para um achado não zerar o domínio.</p>
+            </div>
+          </header>
+          <div class="chart-box chart-doughnut-wrap">
+            <canvas id="chartConformidade" aria-label="Rosca de achados por severidade"></canvas>
+            <div class="doughnut-center" id="gaugeCenter"></div>
+          </div>
+          <footer class="card-foot" id="conformidadeFoot"></footer>
+        </article>
+
+        <article class="card">
+          <header class="card-head">
+            <div>
+              <h2>Regras ativas</h2>
+              <p class="card-sub">Cada regra vira um ticket recorrente de recertificação.</p>
+            </div>
+          </header>
+          <div class="table-wrap">
+            <table class="table" id="tblRegras">
+              <thead><tr><th>Regra</th><th>Achados</th><th>Severidade base</th><th>O que verifica</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </article>
+      </div>
+
+      <article class="card">
+        <header class="card-head">
+          <div>
+            <h2>Achados</h2>
+            <p class="card-sub" id="govSub"></p>
+          </div>
+          <div class="row-actions">
+            <select id="selGovSeveridade" class="input input-sm" aria-label="Filtrar severidade">
+              <option value="">Severidade: todas</option>
+              <option value="critica">Crítica</option>
+              <option value="alta">Alta</option>
+              <option value="media">Média</option>
+              <option value="baixa">Baixa</option>
+            </select>
+            <label class="check"><input type="checkbox" id="chkGovPlano"> só o que o plano resolve</label>
+            <button class="btn btn-ghost btn-sm" type="button" id="btnExportGov">Exportar CSV</button>
+          </div>
+        </header>
+        <div class="table-wrap">
+          <table class="table" id="tblGovernanca">
+            <thead><tr><th>Severidade</th><th>Conta</th><th>Regra</th><th>Achado</th><th>Detalhe</th><th>Correção</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+
+    <section class="view" id="view-auditoria">
+      <article class="card">
+        <header class="card-head">
+          <div>
+            <h2>Trilha de auditoria</h2>
+            <p class="card-sub">Cada registro assina o anterior: apagar ou reordenar o meio quebra a cadeia.</p>
+          </div>
+          <div class="row-actions">
+            <span class="stamp" id="cadeiaStatus"></span>
+            <button class="btn btn-ghost btn-sm" type="button" id="btnVerificarCadeia">Verificar cadeia</button>
+            <button class="btn btn-ghost btn-sm" type="button" id="btnTamper">Simular adulteração</button>
+            <button class="btn btn-primary btn-sm" type="button" id="btnExportAudit">Exportar CSV</button>
+          </div>
+        </header>
+        <div class="table-wrap">
+          <table class="table table-audit" id="tblAuditoria">
+            <thead><tr><th>Data/hora</th><th>Tipo</th><th>Alvo</th><th>Ator</th><th>Requisição</th><th>Detalhe</th><th>Hash anterior</th><th>Hash</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <footer class="card-foot" id="auditFoot"></footer>
+      </article>
+    </section>
+  </main>
+</div>
+
+<div class="toast-host" id="toasts" aria-live="polite"></div>
+
+<div class="modal" id="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modalTitulo">
+    <header class="modal-head">
+      <h2 id="modalTitulo">Título</h2>
+      <button class="icon-btn" type="button" data-close aria-label="Fechar">×</button>
+    </header>
+    <div class="modal-body" id="modalBody"></div>
+    <footer class="modal-foot" id="modalFoot"></footer>
+  </div>
+</div>
+
+<script src="vendor/chart.umd.min.js"></script>
+<script src="src/utils.js"></script>
+<script src="src/diretorio.js"></script>
+<script src="src/iac.js"></script>
+<script src="src/execucao.js"></script>
+<script src="src/governanca.js"></script>
+<script src="src/store.js"></script>
+<script src="src/charts.js"></script>
+<script src="src/ui.js"></script>
+<script src="src/app.js"></script>
+</body>
+</html>
